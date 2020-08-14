@@ -1,0 +1,22 @@
+version: "3.4"
+services:
+  mongo:
+    image: mongo:3.6-xenial
+    container_name: mongo
+    ports:
+      - 27017:27017
+
+  postgres:
+    image: postgres:11.7
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - 5432:5432
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - 5672:5672

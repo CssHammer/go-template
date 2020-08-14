@@ -1,90 +1,113 @@
-SHELL=/bin/bash
-ROOT_DIR := $(shell pwd)
-IMAGE_TAG := $(shell git rev-parse --short HEAD)
-IMAGE_NAME := company/srv
-REGISTRY := change-it.dkr.ecr.us-west-2.amazonaws.com
+include *.mk
+SHELL:=/bin/bash
+REGISTRY=docker.ginsp.net
+GIN_DIRECTORY:=${HOME}/.gin
+TAGGER_DIRECTORY:=${GIN_DIRECTORY}/tagger
+TAGGER_BINARY:=${TAGGER_DIRECTORY}/tagger.py
+TAGGER_REMOTE:=ssh://git@git.syneforge.com:7999/gin/tagger.git
 
-.PHONY: ci
-ci: deps deps_check lint build test
+OS :=$(shell uname -s)
 
-.PHONY: deps
-deps:
-	GOSUMDB=off GO111MODULE=on GOPROXY=direct go mod download
-	GOSUMDB=off GO111MODULE=on GOPROXY=direct go mod vendor
+.PHONY: check-werf
+check-werf:
+	@which werf > /dev/null 2>&1 || (echo You\'re missing werf executable; @exit 1)
 
-.PHONY: deps_check
-deps_check:
-	@test -z "$(shell git status -s ./vendor ./Gopkg.*)"
+.PHONY: check-kubectl
+check-kubectl:
+	@which kubectl > /dev/null 2>&1 || (echo You\'re missing kubectl executable; @exit 1)
 
-.PHONY: grpcgen
-grpcgen:
-	protoc -I api api/service.proto --go_out=plugins=grpc:api
+.PHONY: check-python
+check-python:
+	@which python > /dev/null 2>&1 || (echo You\'re missing python executable; @exit 1)
 
-.PHONY: gqlgen
-gqlgen:
-	cd srvgql && \
-	rm -f generated.go models/*_gen.go && \
-	go run scripts/gqlgen.go -v
+.PHONY: fetch-tagger
+fetch-tagger:
+ifeq "$(wildcard ${TAGGER_BINARY})" ""
+	@echo Tagger binary not found. Trying to download from GIN repository
+ifneq (,$(wildcard ${TAGGER_DIRECTORY}))
+	@echo Directory is not empty. Cleaning up
+	@rm -rf ${TAGGER_DIRECTORY}
+endif
+	@git clone ${TAGGER_REMOTE} ${TAGGER_DIRECTORY} > /dev/null 2>&1
+	@chmod +x ${TAGGER_BINARY}
+endif
+
+.PHONY: update-tagger
+update-tagger:
+	@rm -rf ${TAGGER_DIRECTORY}
+	@git clone ${TAGGER_REMOTE} ${TAGGER_DIRECTORY} > /dev/null 2>&1
+	@chmod +x ${TAGGER_BINARY}
+
+current-tag:
+ifeq "${RELEASE}" ""
+	$(eval RELEASE := $(shell ${TAGGER_BINARY} --current))
+endif
+	@if [ "${RELEASE}" == "" ]; then echo Tagger returned non-zero exit code; exit 1; fi
+	@echo Got version ${RELEASE}
+
+.PHONY: next-tag
+next-tag:
+ifeq "${RELEASE}" ""
+	$(eval RELEASE := $(shell ${TAGGER_BINARY}))
+endif
+	@if [ "${RELEASE}" == "" ]; then echo Tagger returned non-zero exit code; exit 1; fi
+	@echo Preparing to deploy ${RELEASE}
+
+.PHONY: build-werf
+build-werf:
+	OS=${OS} werf build ${SERVICE} --stages-storage :local
+
+.PHONY: push-werf
+push-werf:
+	OS=${OS} werf publish ${SERVICE} --stages-storage :local --tag-git-tag ${RELEASE} --images-repo ${REGISTRY}
 
 .PHONY: build
-build:
-	go build -o artifacts/svc
+build: check next-tag build-werf push-werf
 
-.PHONY: run
-run:
-	go run ./main.go
+.PHONY: check
+check: check-werf check-kubectl check-python fetch-tagger
 
-.PHONY: lint
-lint:
-	golangci-lint run
+define k8s-deploy
+	kubectl config use-context ${1} && \
+	helm3 upgrade ${SERVICE} .helm \
+	  --install --timeout 10m --wait \
+	  --kube-context=${1} \
+	  --namespace=${2} \
+	  --set "global.namespace=${2}" \
+	  --set "global.image=${REGISTRY}/${SERVICE}:${RELEASE}" \
+	  --values ".helm/${3}" \
+	  --values .helm/dec-secrets.yaml || (rm -f .helm/dec-*.yaml && false)
+	rm -f .helm/dec-*.yaml
+endef
 
-.PHONY: test
-test:
-	go test -cover -v `go list ./...`
+.PHONY: kube-stage-deploy
+kube-stage-deploy:
+	@echo Deploying release ${RELEASE} to the Google K8s Engine
+	sops -d .helm/secret-values-stage.yaml > .helm/dec-secrets.yaml
+	$(call k8s-deploy,${STAGE_KUBE_CONTEXT},${STAGE_NAMESPACE},values-stage.yaml)
 
-.PHONY: test_integration
-test_integration:
-	INTEGRATION_TEST=YES go test -cover -v `go list ./...`
+.PHONY: deploy-stage
+deploy-stage: current-tag kube-stage-deploy
 
-.PHONY: dockerise
-dockerise:
-	docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f Dockerfile .
-	docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+.PHONY: stage
+stage: build deploy-stage
 
-.PHONY: deploy
-deploy:
-	`AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials AWS_PROFILE=xid aws ecr get-login --region us-west-2 --no-include-email`
-	docker push ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
-	#docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${REGISTRY}/${IMAGE_NAME}:latest
-	#docker push ${REGISTRY}/${IMAGE_NAME}:latest
+.PHONY: kube-production-deploy
+kube-production-deploy:
+	@echo Deploying release ${RELEASE} to the Google K8s Engine
+	sops -d .helm/secret-values-prod.yaml > .helm/dec-secrets.yaml
+	$(call k8s-deploy,${PRODUCTION_KUBE_CONTEXT},${PRODUCTION_NAMESPACE},values-prod.yaml)
 
+.PHONY: deploy-production
+deploy-production: current-tag kube-production-deploy
 
-.PHONY: mockgen
-mockgen:
-	mockgen -source=service/service.go -destination=service/mock/deps.go
-	mockgen -source=srvhttp/service.go -destination=srvhttp/mock/service.go
-	mockgen -source=srvgrpc/service.go -destination=srvgrpc/mock/service.go
-	mockgen -source=srvgql/service.go -destination=srvgql/mock/service.go
+.PHONY: production
+production: build deploy-production
 
-.PHONY: run_postgresql
-run_postgresql:
-	docker run -d --name dummy_postgresql -e POSTGRES_DB=dummy -v ${ROOT_DIR}/tmp/sql/data:/var/lib/postgresql/data -p 5432:5432 postgres:11
+.PHONY: secrets-stage
+secrets-stage:
+	sops --encrypt --gcp-kms "${STAGE_GCP_KMS_KEY}" --input-type yaml --output-type yaml ./.helm/_secret-values.yaml > ./.helm/secret-values-stage.yaml
 
-.PHONY: run_redis
-run_redis:
-	docker run --name dummy_redis -p 6379:6379 -d redis
-
-.PHONY: start_deps
-start_deps:
-	docker start dummy_redis
-	docker start dummy_postgresql
-
-.PHONY: stop_deps
-stop_deps:
-	docker stop dummy_redis
-	docker stop dummy_postgresql
-
-#.PHONY: exec_redis_sh
-#exec_redis_sh:
-#	docker exec -it dummy_redis sh
-#    # redis-cli
+.PHONY: secrets-prod
+secrets-prod:
+	sops --encrypt --gcp-kms "${PRODUCTION_GCP_KMS_KEY}" --input-type yaml --output-type yaml ./.helm/_secret-values.yaml > ./.helm/secret-values-prod.yaml

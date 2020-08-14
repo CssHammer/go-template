@@ -1,0 +1,70 @@
+{{- $base_image := "golang:1.14-stretch" -}}
+{{- $service_name := "template-sv" -}}
+{{- $service_path := "/app" -}}
+{{- $project_name := (trimSuffix "-sv" $service_name) -}}
+
+project: {{ $project_name }}
+configVersion: 1
+
+---
+artifact: app
+from: {{ $base_image }}
+mount:
+{{ if (env "GOPATH") }}
+- fromPath: {{ env "GOPATH" | printf "%s/pkg" }}
+{{ else }}
+- from: build_dir
+{{ end }}
+  to: /go/pkg
+{{ if eq (env "OS") "Darwin" }}
+- fromPath: /var/run
+{{ else }}
+- fromPath: /run
+{{ end }}
+  to: /tmp/docker
+{{ if eq (env "OS") "Darwin" }}
+- fromPath: {{ env "HOME" }}/.ssh
+  to: /root/.ssh
+{{ end }}
+git:
+- add: '/'
+  to: '/src'
+  includePaths: ['*.go', 'pkg', 'cmd', 'internal', 'go.mod', 'go.sum']
+  stageDependencies:
+    install:
+    - "go.mod"
+    - "go.sum"
+    beforeSetup:
+    - "*.go"
+    - "pkg"
+    - "cmd"
+    - "internal"
+shell:
+  install:
+  - git config --global url."ssh://git@git.syneforge.com:7999".insteadOf https://git.syneforge.com/scm
+  - go env -w GOPRIVATE=git.syneforge.com/*
+  - mkdir ~/.ssh && echo "StrictHostKeyChecking no" >> ~/.ssh/config
+  - cd /src
+  - go mod download
+
+  beforeSetup:
+  - cd /src
+  - DOCKER_HOST=unix:///tmp/docker/docker.sock OS={{ env "OS" }} go test ./...
+
+  setup:
+  - cd /src/cmd/template
+  - >
+    CGO_ENABLED=0 GOOS=linux
+    go build -v -a -o {{ $service_path }}/template -ldflags "-X main.ServiceVersion={{ env "RELEASE" | default "dirty" }}"
+  - strip --strip-unneeded {{ $service_path }}/template
+---
+image: template-sv
+from: alpine:latest
+import:
+- artifact: app
+  add: {{ $service_path }}
+  after: install
+docker:
+  EXPOSE: ['80/tcp', '8080/udp']
+  WORKDIR: '{{ $service_path }}'
+  CMD: ['./template']

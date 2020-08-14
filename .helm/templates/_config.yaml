@@ -1,0 +1,18 @@
+{{- define "service.config" }}
+- name: JAEGER_AGENT_HOST
+  valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+- name: JAEGER_AGENT_PORT
+  value: "6831"
+- name: JAEGER_SERVICE_NAME
+  value: {{ .Chart.Name | quote }}
+- name: JAEGER_SAMPLER_TYPE
+  value: {{ default "const" .Values.jaegerSamplerType | quote }}
+- name: JAEGER_SAMPLER_PARAM
+  value: {{ default "1" .Values.jaegerSamplerParam | quote  }}
+- name: LISTEN_HTTP
+  value: "0.0.0.0:80"
+- name: MONGO_DSN
+  valueFrom: {secretKeyRef: {name: {{ .Chart.Name }}-secret, key: mongo_dsn}}
+- name: DEBUG
+  value: {{ .Values.debug | quote }}
+{{ end -}}

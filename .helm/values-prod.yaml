@@ -1,0 +1,12 @@
+imageRegistry: 'docker.ginsp.net'
+
+containerResources:
+  sv:
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "250m"
+
+debug: true
+
+daemons: []

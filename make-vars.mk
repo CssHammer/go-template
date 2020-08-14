@@ -1,0 +1,7 @@
+SERVICE:="template-sv"
+STAGE_NAMESPACE:="trading-stage"
+PRODUCTION_NAMESPACE:="trading-prod"
+STAGE_KUBE_CONTEXT:="gke_gin-trading-sand_europe-west4_trading-sand"
+PRODUCTION_KUBE_CONTEXT:="gke_gin-trading-prod_europe-west4_trading-nl"
+STAGE_GCP_KMS_KEY:="projects/gin-trading-sand/locations/global/keyRings/sops/cryptoKeys/sops-key"
+PRODUCTION_GCP_KMS_KEY:="projects/gin-trading-prod/locations/global/keyRings/sops/cryptoKeys/sops-key"
